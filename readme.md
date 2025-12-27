@@ -1,47 +1,129 @@
-# WireGuard VPN Default Configuration
-# Edit these values to customize your VPN setup
+# WireGuard VPN Automation Script with bash and Ubuntu Linux
 
-# Server Configuration
-SERVER_PORT=51820
-SERVER_SUBNET="10.8.0.0/24"
-SERVER_IP="10.8.0.1"
+A bash-based automation tool for deploying and managing WireGuard VPN servers on Ubuntu Linux with user management capabilities.
 
-# DNS Configuration
-# Use Cloudflare DNS by default
-PRIMARY_DNS="1.1.1.1"
-SECONDARY_DNS="1.0.0.1"
-# Alternative options:
-# Google DNS: 8.8.8.8, 8.8.4.4
-# Quad9: 9.9.9.9, 149.112.112.112
+## Features
 
-# Network Interface
-# Leave empty for auto-detection
-NETWORK_INTERFACE=""
+- Automated WireGuard server installation and configuration
+- User/client management (add, remove, list)
+- Automatic firewall configuration (UFW/iptables)
+- QR code generation for mobile clients
+- Configuration file generation
+- IPv4 forwarding setup
+- Systemd service management
 
-# Client Configuration
-# Starting IP for client allocation
-CLIENT_START_IP=2
+## Prerequisites
 
-# Keepalive interval (seconds)
-# Helps maintain connection through NAT
-KEEPALIVE_INTERVAL=25
+- Ubuntu 20.04 or newer
+- Root or sudo access
+- Public IP address or domain name
 
-# Security Settings
-# Key permissions
-KEY_PERMISSIONS=600
-DIR_PERMISSIONS=700
+## Installation
 
-# Logging
-ENABLE_LOGGING=true
-LOG_FILE="/var/log/wireguard-setup.log"
+1. Clone this repository:
+```bash
+git clone https://github.com/yourusername/wireguard-automation.git
+cd wireguard-automation
+```
 
-# Backup
-ENABLE_BACKUP=true
-BACKUP_DIR="/var/backups/wireguard"
+2. Make scripts executable:
+```bash
+chmod +x *.sh
+```
 
-# Performance Tuning
-# MTU size (usually 1420 for WireGuard)
-MTU=1420
+3. Run the installation script:
+```bash
+sudo ./install.sh
+```
 
-# Maximum number of clients
-MAX_CLIENTS=254
+## Usage
+
+### Install WireGuard Server
+```bash
+sudo ./wireguard-setup.sh install
+```
+
+### Add a Client
+```bash
+sudo ./wireguard-setup.sh add-client <client-name>
+```
+
+### Remove a Client
+```bash
+sudo ./wireguard-setup.sh remove-client <client-name>
+```
+
+### List All Clients
+```bash
+sudo ./wireguard-setup.sh list-clients
+```
+
+### Show Server Status
+```bash
+sudo ./wireguard-setup.sh status
+```
+
+### Uninstall WireGuard
+```bash
+sudo ./wireguard-setup.sh uninstall
+```
+
+## Configuration
+
+Default configuration is stored in `/etc/wireguard/wg0.conf`
+
+Client configurations are saved to `/etc/wireguard/clients/`
+
+Default settings:
+- Server Port: 51820
+- Server IP: 10.8.0.1/24
+- DNS: 1.1.1.1, 1.0.0.1
+
+## Project Structure
+
+```
+wireguard-automation/
+├── README.md
+├── install.sh              # Initial setup and dependency installation
+├── wireguard-setup.sh      # Main VPN management script
+├── config/
+│   └── defaults.conf       # Default configuration values
+└── utils/
+    ├── firewall.sh         # Firewall configuration utilities
+    └── client-gen.sh       # Client configuration generator
+```
+
+## Security Considerations
+
+- All private keys are generated with appropriate permissions (600)
+- Configuration directory is protected (700)
+- Uses modern cryptography (Curve25519)
+- Implements principle of least privilege
+
+## Troubleshooting
+
+**VPN not connecting:**
+- Check firewall rules: `sudo ufw status`
+- Verify WireGuard is running: `sudo systemctl status wg-quick@wg0`
+- Check server logs: `sudo journalctl -u wg-quick@wg0`
+
+**Port already in use:**
+- Modify the port in `/etc/wireguard/wg0.conf`
+- Update firewall rules accordingly
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+MIT License - See LICENSE file for details
+
+## Author
+
+(https://github.com/kpratikshak)
+
+## Acknowledgments
+
+- WireGuard project
+- Ubuntu Linux community
