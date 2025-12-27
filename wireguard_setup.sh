@@ -1,34 +1,36 @@
 #!/bin/bash
-# This script checks prerequisites, validates the system, and prepares for VPN deployment
+
+# Description: Automated WireGuard VPN server deployment and client management
 
 set -e
 
-# Color codes
+# Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
 # Configuration
-SCRIPT_VERSION="1.0.0"
-MIN_KERNEL_VERSION="3.10"
-REQUIRED_DISK_SPACE=100 # MB
-PROJECT_DIR=$(pwd)
+WG_DIR="/etc/wireguard"
+WG_CONFIG="$WG_DIR/wg0.conf"
+CLIENT_DIR="$WG_DIR/clients"
+SERVER_PORT="51820"
+SERVER_IP="10.8.0.1/24"
+DNS_SERVERS="1.1.1.1,1.0.0.1"
+LOG_FILE="/var/log/wireguard-setup.log"
 
-# Print banner
-print_banner() {
-    echo -e "${CYAN}"
-    cat << "EOF"
-╦ ╦┬┬─┐┌─┐╔═╗┬ ┬┌─┐┬─┐┌┬┐  ╦  ╦╔═╗╔╗╔
-║║║│├┬┘├┤ ║ ╦│ │├─┤├┬┘ ││  ╚╗╔╝╠═╝║║║
-╚╩╝┴┴└─└─┘╚═╝└─┘┴ ┴┴└──┴┘   ╚╝ ╩  ╝╚╝
-    Automated Setup & Management
-EOF
-    echo -e "${NC}"
-    echo -e "${BLUE}Version: $SCRIPT_VERSION${NC}"
-    echo ""
+# Logging function
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+# Check if running as root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}Error: This script must be run as root${NC}"
+        exit 1
+    fi
 }
 
 # Print colored messages
@@ -38,361 +40,505 @@ print_msg() {
     echo -e "${color}$@${NC}"
 }
 
-# Print with icon
-print_status() {
-    local status=$1
-    local message=$2
-    
-    case $status in
-        ok)
-            echo -e "${GREEN}✓${NC} $message"
-            ;;
-        error)
-            echo -e "${RED}✗${NC} $message"
-            ;;
-        warn)
-            echo -e "${YELLOW}⚠${NC} $message"
-            ;;
-        info)
-            echo -e "${BLUE}ℹ${NC} $message"
-            ;;
-    esac
+# Get server public IP
+get_public_ip() {
+    local ip=$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 icanhazip.com 2>/dev/null || curl -s -4 ipecho.net/plain 2>/dev/null)
+    if [[ -z "$ip" ]]; then
+        ip=$(ip -4 addr | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
+    fi
+    echo "$ip"
 }
 
-# Check if running as root
-check_root() {
-    print_msg "$YELLOW" "[1/10] Checking privileges..."
+# Get default network interface
+get_interface() {
+    ip route | grep default | awk '{print $5}' | head -n1
+}
+
+# Install WireGuard and dependencies
+install_wireguard() {
+    print_msg "$GREEN" "===================================="
+    print_msg "$GREEN" "Installing WireGuard VPN Server"
+    print_msg "$GREEN" "===================================="
+    echo ""
     
-    if [[ $EUID -ne 0 ]]; then
-        print_status "error" "This script must be run as root"
-        echo ""
-        print_msg "$YELLOW" "Please run: sudo $0"
+    log "Starting WireGuard installation"
+    
+    print_msg "$YELLOW" "[1/6] Updating package lists..."
+    apt update -qq
+    
+    print_msg "$YELLOW" "[2/6] Installing WireGuard..."
+    apt install -y wireguard wireguard-tools > /dev/null 2>&1
+    
+    print_msg "$YELLOW" "[3/6] Installing additional tools..."
+    apt install -y qrencode iptables resolvconf curl > /dev/null 2>&1
+    
+    print_msg "$YELLOW" "[4/6] Enabling IP forwarding..."
+    if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    fi
+    sysctl -p > /dev/null 2>&1
+    
+    print_msg "$YELLOW" "[5/6] Creating log file..."
+    touch "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
+    
+    print_msg "$YELLOW" "[6/6] Verifying installation..."
+    if ! command -v wg &> /dev/null; then
+        print_msg "$RED" "Error: WireGuard installation failed"
+        log "ERROR: WireGuard installation failed"
         exit 1
     fi
     
-    print_status "ok" "Running with root privileges"
+    print_msg "$GREEN" "✓ WireGuard installed successfully!"
+    log "WireGuard installation completed"
 }
 
-# Detect and validate OS
-check_os() {
-    print_msg "$YELLOW" "[2/10] Detecting operating system..."
+# Generate server configuration
+setup_server() {
+    print_msg "$YELLOW" ""
+    print_msg "$YELLOW" "Setting up WireGuard server..."
+    echo ""
     
-    if [[ ! -f /etc/os-release ]]; then
-        print_status "error" "Cannot detect operating system"
-        exit 1
-    fi
-    
-    . /etc/os-release
-    
-    print_status "ok" "OS: $PRETTY_NAME"
-    
-    # Check if OS is supported
-    if [[ "$ID" == "ubuntu" ]] || [[ "$ID" == "debian" ]]; then
-        print_status "ok" "Supported distribution detected"
-        
-        # Check version
-        if [[ "$ID" == "ubuntu" ]]; then
-            local version=$(echo $VERSION_ID | cut -d. -f1)
-            if [[ $version -lt 18 ]]; then
-                print_status "warn" "Ubuntu 18.04 or newer is recommended"
-            fi
-        fi
-    else
-        print_status "warn" "This script is optimized for Ubuntu/Debian"
-        print_msg "$YELLOW" "   Detected: $PRETTY_NAME"
-        print_msg "$YELLOW" "   Continuing with installation..."
-    fi
-}
-
-# Check kernel version
-check_kernel() {
-    print_msg "$YELLOW" "[3/10] Checking kernel version..."
-    
-    local kernel_version=$(uname -r | cut -d. -f1,2)
-    local required_version=$MIN_KERNEL_VERSION
-    
-    if awk -v ver="$kernel_version" -v req="$required_version" 'BEGIN{exit(!(ver>=req))}'; then
-        print_status "ok" "Kernel version: $(uname -r)"
-    else
-        print_status "error" "Kernel version $(uname -r) is too old"
-        print_msg "$RED" "   Minimum required: $MIN_KERNEL_VERSION"
-        exit 1
-    fi
-}
-
-# Check for virtualization environment
-check_virtualization() {
-    print_msg "$YELLOW" "[4/10] Checking virtualization environment..."
-    
-    if systemd-detect-virt &> /dev/null; then
-        local virt=$(systemd-detect-virt)
-        
-        if [[ "$virt" != "none" ]]; then
-            print_status "info" "Running in $virt environment"
-            
-            # Check for WSL
-            if grep -qi microsoft /proc/version 2>/dev/null; then
-                print_status "warn" "WSL detected - limited functionality"
-                print_msg "$YELLOW" "   Some WireGuard features may not work in WSL"
-            fi
-            
-            # Check for OpenVZ/LXC
-            if [[ "$virt" == "openvz" ]] || [[ "$virt" == "lxc" ]]; then
-                print_status "warn" "Container environment detected"
-                print_msg "$YELLOW" "   TUN/TAP support required for WireGuard"
-            fi
-        else
-            print_status "ok" "Running on bare metal"
-        fi
-    else
-        print_status "ok" "Virtualization check passed"
-    fi
-}
-
-# Check internet connectivity
-check_internet() {
-    print_msg "$YELLOW" "[5/10] Checking internet connectivity..."
-    
-    local hosts=("8.8.8.8" "1.1.1.1" "9.9.9.9")
-    local connected=false
-    
-    for host in "${hosts[@]}"; do
-        if ping -c 1 -W 2 "$host" &> /dev/null; then
-            connected=true
-            break
-        fi
-    done
-    
-    if $connected; then
-        print_status "ok" "Internet connection available"
-    else
-        print_status "error" "No internet connection detected"
-        print_msg "$RED" "   Internet access is required for installation"
-        exit 1
-    fi
-    
-    # Check DNS resolution
-    if host google.com &> /dev/null || nslookup google.com &> /dev/null; then
-        print_status "ok" "DNS resolution working"
-    else
-        print_status "warn" "DNS resolution may have issues"
-    fi
-}
-
-# Check available disk space
-check_disk_space() {
-    print_msg "$YELLOW" "[6/10] Checking disk space..."
-    
-    local available=$(df /tmp | tail -1 | awk '{print $4}')
-    local required=$((REQUIRED_DISK_SPACE * 1024))
-    
-    if [[ $available -gt $required ]]; then
-        local available_mb=$((available / 1024))
-        print_status "ok" "Available space: ${available_mb}MB"
-    else
-        print_status "error" "Insufficient disk space"
-        print_msg "$RED" "   Required: ${REQUIRED_DISK_SPACE}MB"
-        exit 1
-    fi
-}
-
-# Check for conflicting services
-check_conflicts() {
-    print_msg "$YELLOW" "[7/10] Checking for conflicting services..."
-    
-    local conflicts=false
-    
-    # Check if port 51820 is already in use
-    if ss -tulpn | grep -q ":51820"; then
-        print_status "warn" "Port 51820 is already in use"
-        conflicts=true
-    fi
-    
-    # Check if WireGuard is already installed
-    if command -v wg &> /dev/null; then
-        print_status "warn" "WireGuard is already installed"
-        if systemctl is-active --quiet wg-quick@wg0; then
-            print_status "warn" "WireGuard service is running"
-        fi
-    fi
-    
-    if ! $conflicts; then
-        print_status "ok" "No conflicts detected"
-    else
-        echo ""
-        print_msg "$YELLOW" "   Conflicts detected. Continue anyway? (yes/no)"
-        read -r response
-        if [[ "$response" != "yes" ]]; then
-            print_msg "$RED" "Installation cancelled"
-            exit 1
-        fi
-    fi
-}
-
-# Install base dependencies
-install_dependencies() {
-    print_msg "$YELLOW" "[8/10] Installing base dependencies..."
-    
-    export DEBIAN_FRONTEND=noninteractive
-    
-    # Update package lists
-    print_msg "$BLUE" "   → Updating package lists..."
-    apt-get update -qq 2>&1 | grep -v "^Get:" || true
-    
-    # Install essential tools
-    local packages=(
-        "curl"
-        "wget"
-        "net-tools"
-        "iproute2"
-        "iptables"
-        "gnupg"
-        "ca-certificates"
-        "software-properties-common"
-    )
-    
-    print_msg "$BLUE" "   → Installing packages..."
-    for package in "${packages[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $package "; then
-            apt-get install -y "$package" > /dev/null 2>&1
-        fi
-    done
-    
-    print_status "ok" "Dependencies installed"
-}
-
-# Setup project structure
-setup_project() {
-    print_msg "$YELLOW" "[9/10] Setting up project structure..."
+    log "Starting server setup"
     
     # Create directories
-    mkdir -p "$PROJECT_DIR"/{config,utils,logs,backups}
+    mkdir -p "$WG_DIR" "$CLIENT_DIR"
+    chmod 700 "$WG_DIR" "$CLIENT_DIR"
     
-    # Create config directory
-    if [[ ! -d "$PROJECT_DIR/config" ]]; then
-        mkdir -p "$PROJECT_DIR/config"
-    fi
+    # Generate server keys
+    print_msg "$BLUE" "→ Generating server keys..."
+    cd "$WG_DIR"
+    umask 077
+    wg genkey | tee server_private.key | wg pubkey > server_public.key
+    chmod 600 server_private.key server_public.key
     
-    # Create utils directory
-    if [[ ! -d "$PROJECT_DIR/utils" ]]; then
-        mkdir -p "$PROJECT_DIR/utils"
-    fi
+    local server_private=$(cat server_private.key)
+    local server_public=$(cat server_public.key)
     
-    # Create logs directory
-    if [[ ! -d "$PROJECT_DIR/logs" ]]; then
-        mkdir -p "$PROJECT_DIR/logs"
-    fi
+    # Get network interface
+    local iface=$(get_interface)
+    print_msg "$BLUE" "→ Detected network interface: $iface"
     
-    print_status "ok" "Project structure created"
-}
+    # Get public IP
+    local public_ip=$(get_public_ip)
+    print_msg "$BLUE" "→ Detected public IP: $public_ip"
+    
+    # Create server configuration
+    print_msg "$BLUE" "→ Creating server configuration..."
+    cat > "$WG_CONFIG" <<EOF
+# WireGuard Server Configuration
+# Generated: $(date)
 
-# Set file permissions
-set_permissions() {
-    print_msg "$YELLOW" "[10/10] Setting file permissions..."
+[Interface]
+Address = $SERVER_IP
+ListenPort = $SERVER_PORT
+PrivateKey = $server_private
+SaveConfig = false
+
+# Firewall rules
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE
+
+# Client configurations will be added below
+
+EOF
     
-    # Make scripts executable
-    if [[ -f "$PROJECT_DIR/wireguard-setup.sh" ]]; then
-        chmod +x "$PROJECT_DIR/wireguard-setup.sh"
-        print_status "ok" "wireguard-setup.sh is executable"
+    chmod 600 "$WG_CONFIG"
+    log "Server configuration created"
+    
+    # Configure firewall
+    configure_firewall
+    
+    # Enable and start WireGuard
+    print_msg "$BLUE" "→ Starting WireGuard service..."
+    systemctl enable wg-quick@wg0 > /dev/null 2>&1
+    systemctl start wg-quick@wg0
+    
+    if systemctl is-active --quiet wg-quick@wg0; then
+        print_msg "$GREEN" "✓ WireGuard service started successfully!"
     else
-        print_status "warn" "wireguard-setup.sh not found"
+        print_msg "$RED" "✗ Failed to start WireGuard service"
+        log "ERROR: Failed to start WireGuard service"
+        exit 1
     fi
     
-    # Set directory permissions
-    chmod 755 "$PROJECT_DIR"
-    chmod 755 "$PROJECT_DIR"/{config,utils,logs,backups} 2>/dev/null || true
-    
-    print_status "ok" "Permissions configured"
-}
-
-# Print system information
-print_system_info() {
     echo ""
-    print_msg "$CYAN" "═══════════════════════════════════════"
-    print_msg "$CYAN" "       System Information"
-    print_msg "$CYAN" "═══════════════════════════════════════"
+    print_msg "$GREEN" "===================================="
+    print_msg "$GREEN" "Server Setup Complete!"
+    print_msg "$GREEN" "===================================="
     echo ""
-    
-    print_msg "$BLUE" "Hostname:        ${NC}$(hostname)"
-    print_msg "$BLUE" "Kernel:          ${NC}$(uname -r)"
-    print_msg "$BLUE" "Architecture:    ${NC}$(uname -m)"
-    
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        print_msg "$BLUE" "OS:              ${NC}$PRETTY_NAME"
-    fi
-    
-    local ip=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
-    print_msg "$BLUE" "IP Address:      ${NC}${ip:-Not detected}"
-    
-    local mem_total=$(free -h | awk '/^Mem:/ {print $2}')
-    local mem_used=$(free -h | awk '/^Mem:/ {print $3}')
-    print_msg "$BLUE" "Memory:          ${NC}${mem_used} / ${mem_total}"
-    
+    print_msg "$YELLOW" "Server Details:"
+    echo "  Public IP: $public_ip"
+    echo "  Port: $SERVER_PORT"
+    echo "  Interface: wg0"
+    echo "  Network: $SERVER_IP"
     echo ""
-}
-
-# Print next steps
-show_next_steps() {
-    echo ""
-    print_msg "$GREEN" "═══════════════════════════════════════"
-    print_msg "$GREEN" "   Installation Preparation Complete!"
-    print_msg "$GREEN" "═══════════════════════════════════════"
-    echo ""
-    
     print_msg "$YELLOW" "Next Steps:"
-    echo ""
-    echo "  1. Install WireGuard VPN Server:"
-    print_msg "$CYAN" "     sudo ./wireguard-setup.sh install"
-    echo ""
-    echo "  2. Add your first client:"
-    print_msg "$CYAN" "     sudo ./wireguard-setup.sh add-client laptop"
-    echo ""
-    echo "  3. Check VPN status:"
-    print_msg "$CYAN" "     sudo ./wireguard-setup.sh status"
-    echo ""
-    echo "  4. View all available commands:"
-    print_msg "$CYAN" "     sudo ./wireguard-setup.sh"
+    echo "  1. Add a client: sudo $0 add-client <client-name>"
+    echo "  2. Check status: sudo $0 status"
     echo ""
     
-    print_msg "$BLUE" "Documentation:"
-    echo "  • README.md - Full documentation"
-    echo "  • config/defaults.conf - Configuration options"
+    log "Server setup completed successfully"
+}
+
+# Configure firewall
+configure_firewall() {
+    print_msg "$BLUE" "→ Configuring firewall..."
+    
+    if command -v ufw &> /dev/null; then
+        # UFW is installed
+        ufw allow "$SERVER_PORT"/udp > /dev/null 2>&1
+        ufw --force enable > /dev/null 2>&1
+        print_msg "$GREEN" "  ✓ UFW rules added"
+        log "UFW firewall configured"
+    else
+        # Use iptables directly
+        if ! iptables -C INPUT -p udp --dport "$SERVER_PORT" -j ACCEPT 2>/dev/null; then
+            iptables -A INPUT -p udp --dport "$SERVER_PORT" -j ACCEPT
+            print_msg "$GREEN" "  ✓ iptables rules added"
+            log "iptables firewall configured"
+        fi
+    fi
+}
+
+# Add a new client
+add_client() {
+    local client_name=$1
+    
+    if [[ -z "$client_name" ]]; then
+        print_msg "$RED" "Error: Client name is required"
+        echo "Usage: $0 add-client <client-name>"
+        exit 1
+    fi
+    
+    # Validate client name
+    if [[ ! "$client_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        print_msg "$RED" "Error: Client name can only contain letters, numbers, hyphens, and underscores"
+        exit 1
+    fi
+    
+    if [[ -f "$CLIENT_DIR/${client_name}.conf" ]]; then
+        print_msg "$RED" "Error: Client '$client_name' already exists"
+        exit 1
+    fi
+    
+    print_msg "$YELLOW" "Creating client: $client_name"
+    echo ""
+    log "Creating client: $client_name"
+    
+    # Generate client keys
+    cd "$CLIENT_DIR"
+    umask 077
+    wg genkey | tee "${client_name}_private.key" | wg pubkey > "${client_name}_public.key"
+    
+    local client_private=$(cat "${client_name}_private.key")
+    local client_public=$(cat "${client_name}_public.key")
+    local server_public=$(cat "$WG_DIR/server_public.key")
+    local server_ip=$(get_public_ip)
+    
+    # Get next available IP
+    local last_ip=$(grep -oP 'AllowedIPs = 10\.8\.0\.\K[0-9]+' "$WG_CONFIG" 2>/dev/null | sort -n | tail -1)
+    local client_ip=$((${last_ip:-1} + 1))
+    
+    if [[ $client_ip -gt 254 ]]; then
+        print_msg "$RED" "Error: No more IP addresses available in the subnet"
+        exit 1
+    fi
+    
+    print_msg "$BLUE" "→ Assigned IP: 10.8.0.$client_ip"
+    
+    # Add client to server config
+    cat >> "$WG_CONFIG" <<EOF
+
+[Peer]
+# Client: $client_name
+# Created: $(date)
+PublicKey = $client_public
+AllowedIPs = 10.8.0.$client_ip/32
+EOF
+    
+    # Create client configuration
+    cat > "$CLIENT_DIR/${client_name}.conf" <<EOF
+# WireGuard Client Configuration
+# Client: $client_name
+# Created: $(date)
+
+[Interface]
+Address = 10.8.0.$client_ip/32
+PrivateKey = $client_private
+DNS = $DNS_SERVERS
+
+[Peer]
+PublicKey = $server_public
+Endpoint = $server_ip:$SERVER_PORT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+    
+    chmod 600 "$CLIENT_DIR/${client_name}.conf"
+    chmod 600 "$CLIENT_DIR/${client_name}_private.key"
+    chmod 644 "$CLIENT_DIR/${client_name}_public.key"
+    
+    # Restart WireGuard
+    print_msg "$BLUE" "→ Reloading WireGuard..."
+    systemctl restart wg-quick@wg0
+    
+    echo ""
+    print_msg "$GREEN" "✓ Client '$client_name' created successfully!"
+    echo ""
+    print_msg "$YELLOW" "Configuration file saved to:"
+    echo "  $CLIENT_DIR/${client_name}.conf"
+    echo ""
+    print_msg "$YELLOW" "To connect this client:"
+    echo "  1. Copy the config file to your device"
+    echo "  2. Import it into your WireGuard client app"
+    echo ""
+    print_msg "$YELLOW" "QR Code for mobile devices:"
+    echo ""
+    qrencode -t ansiutf8 < "$CLIENT_DIR/${client_name}.conf"
     echo ""
     
-    print_msg "$YELLOW" "Need help? Check the README.md file"
+    log "Client $client_name created with IP 10.8.0.$client_ip"
+}
+
+# Remove a client
+remove_client() {
+    local client_name=$1
+    
+    if [[ -z "$client_name" ]]; then
+        print_msg "$RED" "Error: Client name is required"
+        echo "Usage: $0 remove-client <client-name>"
+        exit 1
+    fi
+    
+    if [[ ! -f "$CLIENT_DIR/${client_name}.conf" ]]; then
+        print_msg "$RED" "Error: Client '$client_name' not found"
+        exit 1
+    fi
+    
+    print_msg "$YELLOW" "Removing client: $client_name"
+    
+    # Get client public key
+    local client_public=$(cat "$CLIENT_DIR/${client_name}_public.key")
+    
+    # Remove client from server config
+    sed -i "/# Client: $client_name/,/^$/d" "$WG_CONFIG"
+    
+    # Backup and remove client files
+    local backup_dir="$CLIENT_DIR/removed/$(date +%Y%m%d)"
+    mkdir -p "$backup_dir"
+    mv "$CLIENT_DIR/${client_name}"* "$backup_dir/" 2>/dev/null || true
+    
+    # Restart WireGuard
+    systemctl restart wg-quick@wg0
+    
+    print_msg "$GREEN" "✓ Client '$client_name' removed successfully!"
+    print_msg "$YELLOW" "  Backup saved to: $backup_dir"
+    
+    log "Client $client_name removed"
+}
+
+# List all clients
+list_clients() {
+    print_msg "$YELLOW" "Active VPN Clients:"
+    print_msg "$YELLOW" "===================="
+    echo ""
+    
+    if [[ ! -d "$CLIENT_DIR" ]]; then
+        print_msg "$RED" "No clients directory found"
+        return
+    fi
+    
+    local count=0
+    for conf in "$CLIENT_DIR"/*.conf 2>/dev/null; do
+        if [[ -f "$conf" ]]; then
+            local name=$(basename "$conf" .conf)
+            local ip=$(grep "Address" "$conf" | awk '{print $3}')
+            local created=$(grep "Created:" "$conf" | cut -d: -f2- | xargs)
+            
+            count=$((count + 1))
+            echo "$count. $name"
+            echo "   IP: $ip"
+            echo "   Created: $created"
+            echo ""
+        fi
+    done
+    
+    if [[ $count -eq 0 ]]; then
+        print_msg "$RED" "No clients found"
+        echo ""
+        print_msg "$YELLOW" "Add a client with: sudo $0 add-client <name>"
+    else
+        print_msg "$GREEN" "Total clients: $count"
+    fi
+}
+
+# Show VPN status
+show_status() {
+    print_msg "$YELLOW" "WireGuard VPN Status"
+    print_msg "$YELLOW" "===================="
+    echo ""
+    
+    # Check if WireGuard is installed
+    if ! command -v wg &> /dev/null; then
+        print_msg "$RED" "WireGuard is not installed"
+        echo ""
+        print_msg "$YELLOW" "Install with: sudo $0 install"
+        exit 1
+    fi
+    
+    # Service status
+    if systemctl is-active --quiet wg-quick@wg0; then
+        print_msg "$GREEN" "✓ Service Status: Running"
+    else
+        print_msg "$RED" "✗ Service Status: Stopped"
+    fi
+    
+    # Interface status
+    if ip link show wg0 &> /dev/null; then
+        print_msg "$GREEN" "✓ Interface: wg0 is up"
+    else
+        print_msg "$RED" "✗ Interface: wg0 is down"
+    fi
+    
+    echo ""
+    print_msg "$YELLOW" "Server Information:"
+    echo "  Listen Port: $SERVER_PORT"
+    echo "  Server IP: $(grep "Address" "$WG_CONFIG" 2>/dev/null | awk '{print $3}' || echo "N/A")"
+    echo "  Public IP: $(get_public_ip)"
+    
+    echo ""
+    print_msg "$YELLOW" "Connected Peers:"
+    
+    if wg show wg0 2>/dev/null | grep -q "peer:"; then
+        wg show wg0 | grep -A 3 "peer:" | while read line; do
+            echo "  $line"
+        done
+    else
+        echo "  No peers connected"
+    fi
+    
+    echo ""
+    print_msg "$YELLOW" "Recent Logs:"
+    if [[ -f "$LOG_FILE" ]]; then
+        tail -n 5 "$LOG_FILE" | while read line; do
+            echo "  $line"
+        done
+    else
+        echo "  No logs available"
+    fi
+    
     echo ""
 }
 
-# Error handling
-trap 'print_status "error" "Installation failed at line $LINENO"; exit 1' ERR
+# Backup configuration
+backup_config() {
+    local backup_file="/tmp/wireguard-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    
+    print_msg "$YELLOW" "Creating backup..."
+    
+    tar -czf "$backup_file" -C /etc wireguard 2>/dev/null
+    
+    print_msg "$GREEN" "✓ Backup created: $backup_file"
+    log "Backup created: $backup_file"
+}
+
+# Uninstall WireGuard
+uninstall() {
+    print_msg "$RED" "WARNING: This will remove WireGuard and all configurations!"
+    read -p "Are you sure? (yes/no): " confirm
+    
+    if [[ "$confirm" != "yes" ]]; then
+        print_msg "$YELLOW" "Uninstall cancelled"
+        exit 0
+    fi
+    
+    print_msg "$YELLOW" "Uninstalling WireGuard..."
+    
+    # Create backup first
+    backup_config
+    
+    # Stop service
+    systemctl stop wg-quick@wg0 2>/dev/null || true
+    systemctl disable wg-quick@wg0 2>/dev/null || true
+    
+    # Remove packages
+    apt remove -y wireguard wireguard-tools qrencode > /dev/null 2>&1
+    apt autoremove -y > /dev/null 2>&1
+    
+    # Remove configurations
+    rm -rf "$WG_DIR"
+    
+    print_msg "$GREEN" "✓ WireGuard uninstalled"
+    print_msg "$YELLOW" "Backup saved before removal"
+    log "WireGuard uninstalled"
+}
+
+# Show usage
+show_usage() {
+    cat << EOF
+${GREEN}WireGuard VPN Management Script${NC}
+${YELLOW}=================================${NC}
+
+${BLUE}Usage:${NC} $0 <command> [options]
+
+${BLUE}Commands:${NC}
+  ${GREEN}install${NC}              Install and setup WireGuard server
+  ${GREEN}add-client${NC} <name>    Add a new VPN client
+  ${GREEN}remove-client${NC} <name> Remove a VPN client
+  ${GREEN}list-clients${NC}         List all configured clients
+  ${GREEN}status${NC}               Show VPN server status
+  ${GREEN}backup${NC}               Create configuration backup
+  ${GREEN}uninstall${NC}            Remove WireGuard completely
+
+${BLUE}Examples:${NC}
+  $0 install
+  $0 add-client laptop
+  $0 remove-client laptop
+  $0 list-clients
+  $0 status
+
+${BLUE}Configuration:${NC}
+  Config directory: $WG_DIR
+  Client directory: $CLIENT_DIR
+  Log file: $LOG_FILE
+
+${YELLOW}For more information, see README.md${NC}
+EOF
+}
 
 # Main execution
 main() {
-    print_banner
-    
-    print_msg "$GREEN" "Starting installation preparation..."
-    print_msg "$GREEN" "════════════════════════════════════"
-    echo ""
-    
     check_root
-    check_os
-    check_kernel
-    check_virtualization
-    check_internet
-    check_disk_space
-    check_conflicts
-    install_dependencies
-    setup_project
-    set_permissions
     
-    echo ""
-    print_msg "$GREEN" "════════════════════════════════════"
-    print_msg "$GREEN" "All checks passed!"
-    print_msg "$GREEN" "════════════════════════════════════"
-    
-    print_system_info
-    show_next_steps
+    case "$1" in
+        install)
+            install_wireguard
+            setup_server
+            ;;
+        add-client)
+            add_client "$2"
+            ;;
+        remove-client)
+            remove_client "$2"
+            ;;
+        list-clients)
+            list_clients
+            ;;
+        status)
+            show_status
+            ;;
+        backup)
+            backup_config
+            ;;
+        uninstall)
+            uninstall
+            ;;
+        *)
+            show_usage
+            exit 1
+            ;;
+    esac
 }
 
 main "$@"
